@@ -71,6 +71,48 @@
         </div>
       </header>
 
+      <!-- Data Filters -->
+      <div class="data-filters shrink-0 border-b border-border-subtle px-5 py-3" aria-label="Data filters">
+        <div class="flex items-center justify-between gap-2 mb-2.5">
+          <h2 class="section-label !mb-0 text-slate-400">Data Filters</h2>
+          <span id="filter-result-count" class="font-mono text-[10px] uppercase tracking-wider text-slate-600">—</span>
+        </div>
+        <div class="grid grid-cols-1 gap-2">
+          <div>
+            <label class="field-label" for="filter-region">Region / Continent</label>
+            <select id="filter-region" class="field-input">
+              <option value="all">All Regions</option>
+              <option value="asia">Asia</option>
+              <option value="europe">Europe</option>
+              <option value="north-america">North America</option>
+              <option value="south-america">South America</option>
+              <option value="africa">Africa</option>
+              <option value="oceania">Oceania</option>
+            </select>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="field-label" for="filter-risk">Risk Level</label>
+              <select id="filter-risk" class="field-input">
+                <option value="all">All Risk Levels</option>
+                <option value="critical-disrupted">Critical / Disrupted</option>
+                <option value="high">High Risk</option>
+                <option value="moderate">Moderate Risk</option>
+                <option value="low">Low Risk</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="filter-sort">Sort By</label>
+              <select id="filter-sort" class="field-input">
+                <option value="tanker-volume">Tanker Volume ↓</option>
+                <option value="vulnerability">Vulnerability Score</option>
+                <option value="congestion">Congestion Risk</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="sidebar-content flex-1 overflow-y-auto overflow-x-hidden px-5 py-5">
 
         <!-- Section A: Context Header (Global or Port) -->

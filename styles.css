@@ -96,6 +96,22 @@ body {
   box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
 }
 
+.data-filters {
+  background: linear-gradient(180deg, rgba(15, 20, 28, 0.95) 0%, rgba(15, 20, 25, 0.6) 100%);
+}
+
+.data-filters .field-input {
+  cursor: pointer;
+  opacity: 1;
+  padding: 0.4375rem 0.625rem;
+  font-size: 0.75rem;
+}
+
+.data-filters .field-label {
+  margin-bottom: 0.25rem;
+  font-size: 0.5625rem;
+}
+
 .metric-card {
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }

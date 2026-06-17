@@ -23,7 +23,38 @@
     "https://services9.arcgis.com/weJ1QsnbMYJlCHdG/arcgis/rest/services/Daily_Ports_Data/FeatureServer/0/query?where=1%3D1&outFields=year,month,day,portname,country,portcalls_tanker,import_tanker,export_tanker,portid&outSR=4326&f=json";
 
   const PORTS_GEOMETRY_URL =
-    "https://services9.arcgis.com/weJ1QsnbMYJlCHdG/ArcGIS/rest/services/PortWatch_ports_database/FeatureServer/0/query?where=1%3D1&outFields=portid,portname,country,lat,lon,vessel_count_tanker&returnGeometry=true&outSR=4326&f=json";
+    "https://services9.arcgis.com/weJ1QsnbMYJlCHdG/ArcGIS/rest/services/PortWatch_ports_database/FeatureServer/0/query?where=1%3D1&outFields=portid,portname,country,continent,lat,lon,vessel_count_tanker&returnGeometry=true&outSR=4326&f=json";
+
+  const OCEANIA_COUNTRIES = new Set([
+    "Australia",
+    "New Zealand",
+    "Papua New Guinea",
+    "Fiji",
+    "New Caledonia",
+    "French Polynesia",
+    "Samoa",
+    "Guam",
+    "Solomon Islands",
+    "Vanuatu",
+    "Tonga",
+    "Micronesia",
+    "Palau",
+    "Marshall Islands",
+    "Kiribati",
+    "Tuvalu",
+    "Nauru",
+    "American Samoa",
+    "Cook Islands",
+    "Timor-Leste",
+  ]);
+
+  const VULNERABILITY_RANK = {
+    "CRITICAL (DISRUPTED)": 5,
+    Critical: 4,
+    High: 3,
+    Medium: 2,
+    Low: 1,
+  };
 
   const TILE_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
   const TILE_ATTRIBUTION =
@@ -45,6 +76,7 @@
   let selectedPortData = null;
   let viewMode = "global";
   let allPorts = [];
+  let visiblePortEntries = [];
   const closedChokepoints = new Set();
 
   const ui = {
@@ -68,6 +100,10 @@
     analysisTimestamp: null,
     chokepointToggles: null,
     simulatorStatus: null,
+    filterRegion: null,
+    filterRisk: null,
+    filterSort: null,
+    filterResultCount: null,
   };
 
   function cacheDomElements() {
@@ -91,6 +127,200 @@
     ui.analysisTimestamp = document.getElementById("analysis-timestamp");
     ui.chokepointToggles = document.getElementById("chokepoint-toggles");
     ui.simulatorStatus = document.getElementById("simulator-status");
+    ui.filterRegion = document.getElementById("filter-region");
+    ui.filterRisk = document.getElementById("filter-risk");
+    ui.filterSort = document.getElementById("filter-sort");
+    ui.filterResultCount = document.getElementById("filter-result-count");
+  }
+
+  function initFilterUI() {
+    [ui.filterRegion, ui.filterRisk, ui.filterSort].forEach(function (control) {
+      control.addEventListener("change", applyFiltersAndSort);
+    });
+  }
+
+  function matchesRegion(entry, regionFilter) {
+    if (regionFilter === "all") {
+      return true;
+    }
+
+    const continent = (entry.port.continent || "").toLowerCase();
+    const country = entry.port.country || "";
+
+    if (regionFilter === "africa") {
+      return continent === "africa";
+    }
+
+    if (regionFilter === "europe") {
+      return continent === "europe";
+    }
+
+    if (regionFilter === "north-america") {
+      return continent === "north america";
+    }
+
+    if (regionFilter === "south-america") {
+      return continent === "south america";
+    }
+
+    if (regionFilter === "oceania") {
+      return OCEANIA_COUNTRIES.has(country);
+    }
+
+    if (regionFilter === "asia") {
+      return continent === "asia & pacific" && !OCEANIA_COUNTRIES.has(country);
+    }
+
+    return true;
+  }
+
+  function getPortRiskCategory(entry) {
+    if (entry.isDisrupted) {
+      return "critical-disrupted";
+    }
+
+    const vulnerability = assessVulnerability(entry.port, entry.proximity);
+
+    if (vulnerability.score === "Critical") {
+      return "critical-disrupted";
+    }
+
+    if (vulnerability.score === "High") {
+      return "high";
+    }
+
+    if (vulnerability.score === "Medium") {
+      return "moderate";
+    }
+
+    return "low";
+  }
+
+  function matchesRiskLevel(entry, riskFilter) {
+    if (riskFilter === "all") {
+      return true;
+    }
+
+    return getPortRiskCategory(entry) === riskFilter;
+  }
+
+  function getVulnerabilityRank(entry) {
+    if (entry.isDisrupted) {
+      return VULNERABILITY_RANK["CRITICAL (DISRUPTED)"];
+    }
+
+    const score = assessVulnerability(entry.port, entry.proximity).score;
+    return VULNERABILITY_RANK[score] || 0;
+  }
+
+  function getCongestionRank(entry) {
+    const count = entry.port.vessel_count_tanker;
+
+    if (count > 150) {
+      return 3;
+    }
+
+    if (count >= 50) {
+      return 2;
+    }
+
+    return 1;
+  }
+
+  function sortPortEntries(entries, sortBy) {
+    const sorted = entries.slice();
+
+    sorted.sort(function (a, b) {
+      if (sortBy === "vulnerability") {
+        return getVulnerabilityRank(b) - getVulnerabilityRank(a);
+      }
+
+      if (sortBy === "congestion") {
+        const congestionDiff = getCongestionRank(b) - getCongestionRank(a);
+        if (congestionDiff !== 0) {
+          return congestionDiff;
+        }
+      }
+
+      return b.port.vessel_count_tanker - a.port.vessel_count_tanker;
+    });
+
+    return sorted;
+  }
+
+  function updateFilterResultCount(visibleCount) {
+    const total = allPorts.length;
+
+    if (visibleCount === total) {
+      ui.filterResultCount.textContent = total + " ports";
+      ui.filterResultCount.className =
+        "font-mono text-[10px] uppercase tracking-wider text-slate-600";
+      return;
+    }
+
+    ui.filterResultCount.textContent = visibleCount + " / " + total + " visible";
+    ui.filterResultCount.className =
+      "font-mono text-[10px] uppercase tracking-wider text-accent";
+  }
+
+  function applyFiltersAndSort() {
+    if (!allPorts.length) {
+      return;
+    }
+
+    const regionFilter = ui.filterRegion.value;
+    const riskFilter = ui.filterRisk.value;
+    const sortBy = ui.filterSort.value;
+
+    let filtered = allPorts.filter(function (entry) {
+      return matchesRegion(entry, regionFilter) && matchesRiskLevel(entry, riskFilter);
+    });
+
+    filtered = sortPortEntries(filtered, sortBy);
+    visiblePortEntries = filtered;
+
+    const visibleIds = new Set(
+      filtered.map(function (entry) {
+        return entry.port.portid;
+      })
+    );
+
+    allPorts.forEach(function (entry) {
+      const isVisible = visibleIds.has(entry.port.portid);
+
+      if (isVisible) {
+        if (!portLayer.hasLayer(entry.marker)) {
+          portLayer.addLayer(entry.marker);
+        }
+      } else if (portLayer.hasLayer(entry.marker)) {
+        portLayer.removeLayer(entry.marker);
+
+        if (entry.marker === selectedMarker) {
+          selectedMarker = null;
+          selectedPortData = null;
+          map.closePopup();
+        }
+      }
+    });
+
+    updateFilterResultCount(filtered.length);
+
+    if (viewMode === "global" || !selectedPortData || !visibleIds.has(selectedPortData.portid)) {
+      if (viewMode !== "global") {
+        viewMode = "global";
+      }
+      showGlobalOutlook();
+      return;
+    }
+
+    updateEconomicAnalysis(selectedPortData);
+  }
+
+  function isFilterActive() {
+    return (
+      ui.filterRegion.value !== "all" ||
+      ui.filterRisk.value !== "all"
+    );
   }
 
   function initMap() {
@@ -239,11 +469,12 @@
   }
 
   function computeGlobalStats() {
+    const source = visiblePortEntries;
     let totalTankers = 0;
     let elevatedRiskCount = 0;
     let disruptedCount = 0;
 
-    allPorts.forEach(function (entry) {
+    source.forEach(function (entry) {
       totalTankers += entry.port.vessel_count_tanker;
 
       if (entry.isDisrupted) {
@@ -262,7 +493,8 @@
       totalTankers: totalTankers,
       elevatedRiskCount: elevatedRiskCount,
       disruptedCount: disruptedCount,
-      totalPorts: allPorts.length,
+      totalPorts: source.length,
+      totalUniverse: allPorts.length,
     };
   }
 
@@ -347,11 +579,16 @@
     }
 
     applyDisruptionState();
+    applyFiltersAndSort();
 
     if (viewMode === "port" && selectedPortData) {
-      updateEconomicAnalysis(selectedPortData);
-    } else {
-      showGlobalOutlook();
+      const isVisible = visiblePortEntries.some(function (entry) {
+        return entry.port.portid === selectedPortData.portid;
+      });
+
+      if (isVisible) {
+        updateEconomicAnalysis(selectedPortData);
+      }
     }
   }
 
@@ -443,7 +680,13 @@
       "mt-1 font-mono text-[11px] uppercase tracking-widest text-slate-500";
 
     ui.trafficLabel.textContent = "Total Active Tankers";
-    ui.trafficSublabel.textContent = "Tracked globally across all port nodes";
+    ui.trafficSublabel.textContent = isFilterActive()
+      ? "Filtered subset · " +
+        stats.totalPorts.toLocaleString() +
+        " of " +
+        stats.totalUniverse.toLocaleString() +
+        " ports visible"
+      : "Tracked globally across all port nodes";
     ui.tankerTraffic.textContent = stats.totalTankers.toLocaleString();
 
     ui.congestionLabel.textContent = "Elevated Risk Ports";
@@ -505,9 +748,12 @@
       stats.totalTankers.toLocaleString() +
       " active tanker vessel observations across " +
       stats.totalPorts.toLocaleString() +
-      " port nodes. Currently, " +
+      (isFilterActive()
+        ? " filtered port nodes (of " + stats.totalUniverse.toLocaleString() + " total)"
+        : " port nodes") +
+      ". Currently, " +
       stats.elevatedRiskCount.toLocaleString() +
-      " ports register elevated vulnerability (High or Critical) based on throughput density and proximity to strategic chokepoints. Select any port marker for granular economic inference, or use the shock simulator below to model geopolitical disruption scenarios.";
+      " visible ports register elevated vulnerability (High or Critical) based on throughput density and proximity to strategic chokepoints. Select any port marker for granular economic inference, or use the shock simulator below to model geopolitical disruption scenarios.";
 
     if (stats.disruptedCount > 0) {
       analysis +=
@@ -866,6 +1112,7 @@
           portid: attrs.portid,
           portname: attrs.portname || "Unknown Port",
           country: attrs.country || "—",
+          continent: attrs.continent || "",
           vessel_count_tanker: vesselCount,
           lat: lat,
           lon: lon,
@@ -923,7 +1170,8 @@
     });
 
     console.log("Rendered " + ports.length + " port markers on map");
-    showGlobalOutlook();
+    visiblePortEntries = allPorts.slice();
+    applyFiltersAndSort();
   }
 
   async function fetchPortData() {
@@ -956,6 +1204,7 @@
   function init() {
     console.log("System initialized");
     cacheDomElements();
+    initFilterUI();
     initSimulatorUI();
     initMap();
     fetchPortData();
