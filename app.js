@@ -72,6 +72,13 @@
   const DISRUPTION_ALERT =
     " CRITICAL ALERT: Shipping lanes closed. Alternative routing around Cape of Good Hope required, adding an estimated 10–14 days to transit times and spiking spot freight rates.";
 
+  const FREENEWSAPI_KEY =
+    "962b2c0136d22306dc82e64eee22ecd7dd2a2c8bf45406adead3e6159f8dbecb";
+  const FREENEWSAPI_ENDPOINT = "https://api.freenewsapi.io/v1";
+  const RSS2JSON_ENDPOINT = "https://api.rss2json.com/v1/api.json";
+  const NEWS_FETCH_COUNT = 12;
+  const NEWS_DISPLAY_COUNT = 4;
+
   let map;
   let portLayer;
   let selectedMarker = null;
@@ -80,6 +87,7 @@
   let allPorts = [];
   let visiblePortEntries = [];
   const closedChokepoints = new Set();
+  let activeNewsRequestId = 0;
 
   const ui = {
     panelContextLabel: null,
@@ -111,6 +119,7 @@
     btnCloseMethodology: null,
     methodologyDrawer: null,
     methodologyBackdrop: null,
+    newsFeedContainer: null,
   };
 
   function cacheDomElements() {
@@ -143,6 +152,7 @@
     ui.btnCloseMethodology = document.getElementById("btn-close-methodology");
     ui.methodologyDrawer = document.getElementById("methodology-drawer");
     ui.methodologyBackdrop = document.getElementById("methodology-backdrop");
+    ui.newsFeedContainer = document.getElementById("news-feed-container");
   }
 
   function getSelectLabel(selectElement) {
@@ -624,6 +634,346 @@
     });
   }
 
+  function buildGoogleNewsRssUrl(queryKeyword) {
+    return (
+      "https://news.google.com/rss/search?q=" +
+      encodeURIComponent(queryKeyword) +
+      "&hl=en-US&gl=US&ceid=US:en"
+    );
+  }
+
+  function buildFreeNewsApiUrl(path, params) {
+    const search = new URLSearchParams(params);
+    return FREENEWSAPI_ENDPOINT + path + "?" + search.toString();
+  }
+
+  function freeNewsApiHeaders() {
+    return {
+      "x-api-key": FREENEWSAPI_KEY,
+      Accept: "application/json",
+    };
+  }
+
+  function normalizeRssNewsItem(item) {
+    const titleParts = (item.title || "").split(" - ");
+    const headline =
+      titleParts.length > 1
+        ? titleParts.slice(0, -1).join(" - ").trim()
+        : item.title || "";
+    const publisher =
+      item.author ||
+      (titleParts.length > 1
+        ? titleParts[titleParts.length - 1].trim()
+        : "International Dispatch");
+
+    return {
+      title: headline,
+      publisher: publisher,
+      published_at: item.pubDate,
+      link: item.link || null,
+    };
+  }
+
+  function normalizeFreeNewsArticle(article, details) {
+    const merged = details ? Object.assign({}, article, details) : article;
+
+    return {
+      title: merged.title || "",
+      publisher: merged.publisher || "International Dispatch",
+      published_at: merged.published_at,
+      link: merged.original_url || merged.link || null,
+    };
+  }
+
+  function getNewsArticleKey(item) {
+    return (item.link || item.title || "").toLowerCase().trim();
+  }
+
+  function mergeNewsArticles(primaryArticles, secondaryArticles) {
+    const merged = primaryArticles.slice();
+    const seen = new Set(primaryArticles.map(getNewsArticleKey));
+
+    secondaryArticles.forEach(function (article) {
+      const key = getNewsArticleKey(article);
+
+      if (!key || seen.has(key)) {
+        return;
+      }
+
+      seen.add(key);
+      merged.push(article);
+    });
+
+    return merged.slice(0, NEWS_DISPLAY_COUNT);
+  }
+
+  async function fetchGoogleNewsRss(queryKeyword) {
+    const rssUrl = buildGoogleNewsRssUrl(queryKeyword);
+    const response = await fetch(
+      RSS2JSON_ENDPOINT + "?rss_url=" + encodeURIComponent(rssUrl)
+    );
+    const data = await response.json();
+
+    if (!response.ok || data.status !== "ok" || !Array.isArray(data.items)) {
+      return [];
+    }
+
+    return data.items
+      .slice(0, NEWS_FETCH_COUNT)
+      .map(normalizeRssNewsItem)
+      .filter(function (item) {
+        return item.title;
+      });
+  }
+
+  async function fetchFreeNewsArticleDetails(uuid) {
+    const response = await fetch(
+      buildFreeNewsApiUrl("/details", { uuid: uuid }),
+      { headers: freeNewsApiHeaders() }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    return payload.data || null;
+  }
+
+  async function fetchFreeNewsApi(queryKeyword) {
+    const response = await fetch(
+      buildFreeNewsApiUrl("/news", {
+        language: "en",
+        order_by: "archive",
+        q: queryKeyword,
+        page_size: String(NEWS_FETCH_COUNT),
+      }),
+      { headers: freeNewsApiHeaders() }
+    );
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const payload = await response.json();
+    const articles = Array.isArray(payload.data) ? payload.data : [];
+
+    if (articles.length === 0) {
+      return [];
+    }
+
+    const enriched = await Promise.all(
+      articles.map(async function (article) {
+        try {
+          const details = await fetchFreeNewsArticleDetails(article.uuid);
+          return normalizeFreeNewsArticle(article, details);
+        } catch (error) {
+          return normalizeFreeNewsArticle(article);
+        }
+      })
+    );
+
+    return enriched.filter(function (item) {
+      return item.title;
+    });
+  }
+
+  async function requestNewsFeed(queryKeyword) {
+    const results = await Promise.allSettled([
+      fetchGoogleNewsRss(queryKeyword),
+      fetchFreeNewsApi(queryKeyword),
+    ]);
+
+    const primaryArticles =
+      results[0].status === "fulfilled" ? results[0].value : [];
+    const secondaryArticles =
+      results[1].status === "fulfilled" ? results[1].value : [];
+    const merged = mergeNewsArticles(primaryArticles, secondaryArticles);
+
+    if (merged.length === 0) {
+      throw new Error("News feed unavailable");
+    }
+
+    return merged;
+  }
+
+  function formatRelativeNewsTime(pubDate) {
+    if (!pubDate) {
+      return "";
+    }
+
+    const date = new Date(pubDate);
+    if (isNaN(date.getTime())) {
+      return "";
+    }
+
+    const diffMs = Date.now() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+
+    if (diffMins < 1) {
+      return "just now";
+    }
+    if (diffMins < 60) {
+      return diffMins + "m ago";
+    }
+
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) {
+      return diffHours + "h ago";
+    }
+
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 7) {
+      return diffDays + "d ago";
+    }
+
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
+  function extractNewsSource(item) {
+    if (item.publisher) {
+      return item.publisher;
+    }
+
+    if (item.author) {
+      return item.author;
+    }
+
+    return "International Dispatch";
+  }
+
+  function extractNewsHeadline(item) {
+    return item.title || "";
+  }
+
+  function showNewsFeedIdle() {
+    if (!ui.newsFeedContainer) {
+      return;
+    }
+
+    ui.newsFeedContainer.innerHTML =
+      '<p class="news-feed__idle text-[11px] leading-relaxed text-slate-500">' +
+      "Select a port or chokepoint to gather live regional dispatch…" +
+      "</p>";
+  }
+
+  function showNewsFeedLoading(queryKeyword) {
+    if (!ui.newsFeedContainer) {
+      return;
+    }
+
+    ui.newsFeedContainer.innerHTML =
+      '<div class="flex items-center gap-2.5 py-1" role="status">' +
+      '<div class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-slate-200 border-t-slate-600" aria-hidden="true"></div>' +
+      '<p class="text-[11px] leading-relaxed text-slate-500">Gathering regional dispatch' +
+      (queryKeyword ? ' for <span class="text-slate-600">' + queryKeyword + "</span>…" : "…") +
+      "</p>" +
+      "</div>";
+  }
+
+  function renderNewsFeedError() {
+    if (!ui.newsFeedContainer) {
+      return;
+    }
+
+    ui.newsFeedContainer.innerHTML =
+      '<p class="text-[11px] leading-relaxed text-slate-500">' +
+      "Temporary connection break to international dispatch." +
+      "</p>";
+  }
+
+  function renderNewsBriefing(items, queryKeyword) {
+    if (!ui.newsFeedContainer) {
+      return;
+    }
+
+    if (!items || items.length === 0) {
+      ui.newsFeedContainer.innerHTML =
+        '<p class="text-[11px] leading-relaxed text-slate-500">' +
+        "No recent dispatches matched this regional query." +
+        "</p>";
+      return;
+    }
+
+    let html =
+      '<p class="news-feed__query">Query · ' +
+      queryKeyword +
+      "</p><ul class=\"news-feed__list\">";
+
+    items.forEach(function (item) {
+      const headline = extractNewsHeadline(item);
+      const source = extractNewsSource(item);
+      const relativeTime = formatRelativeNewsTime(item.published_at || item.pubDate);
+      const link = item.link || item.original_url;
+
+      html += '<li class="news-feed__item">';
+
+      if (link) {
+        html +=
+          '<a class="news-feed__link" href="' +
+          link +
+          '" target="_blank" rel="noopener noreferrer">' +
+          headline +
+          "</a>";
+      } else {
+        html += '<span class="news-feed__link news-feed__link--static">' + headline + "</span>";
+      }
+
+      html +=
+        '<div class="news-feed__meta">' +
+        "<span>" +
+        source +
+        "</span>";
+
+      if (relativeTime) {
+        html += '<span aria-hidden="true">·</span><span>' + relativeTime + "</span>";
+      }
+
+      html += "</div></li>";
+    });
+
+    html += "</ul>";
+    ui.newsFeedContainer.innerHTML = html;
+  }
+
+  async function fetchGeopoliticalNews(queryKeyword) {
+    if (!ui.newsFeedContainer || !queryKeyword) {
+      return;
+    }
+
+    const requestId = ++activeNewsRequestId;
+    showNewsFeedLoading(queryKeyword);
+
+    try {
+      const articles = await requestNewsFeed(queryKeyword);
+
+      if (requestId !== activeNewsRequestId) {
+        return;
+      }
+
+      if (articles.length === 0) {
+        renderNewsBriefing([], queryKeyword);
+        return;
+      }
+
+      renderNewsBriefing(articles, queryKeyword);
+    } catch (error) {
+      if (requestId !== activeNewsRequestId) {
+        return;
+      }
+
+      renderNewsFeedError();
+    }
+  }
+
+  function getPortNewsQuery(portData) {
+    return portData.country + " maritime shipping";
+  }
+
+  function getChokepointNewsQuery(chokepointName, isClosed) {
+    return chokepointName + (isClosed ? " crisis" : " ceasefire");
+  }
+
   function computeGlobalStats() {
     const source = visiblePortEntries;
     let totalTankers = 0;
@@ -737,6 +1087,8 @@
     applyDisruptionState();
     applyFiltersAndSort();
 
+    fetchGeopoliticalNews(getChokepointNewsQuery(chokepoint.name, isClosed));
+
     if (viewMode === "port" && selectedPortData) {
       const isVisible = visiblePortEntries.some(function (entry) {
         return entry.port.portid === selectedPortData.portid;
@@ -822,6 +1174,7 @@
   function showGlobalOutlook() {
     viewMode = "global";
     clearMarkerSelection();
+    showNewsFeedIdle();
 
     const stats = computeGlobalStats();
 
@@ -1228,6 +1581,8 @@
     requestAnimationFrame(function () {
       ui.analysisBlock.classList.remove("analysis-block--updated");
     });
+
+    fetchGeopoliticalNews(getPortNewsQuery(portData));
   }
 
   function buildPopupContent(port) {
